@@ -1,1 +1,110 @@
+# preprocess.py
+import pandas as pd
 
+
+def preprocess_data(df: pd.DataFrame, target_column: str) -> tuple[pd.DataFrame, pd.Series]:
+    df = df.copy()
+
+    # Basic cleaning
+    df = df.drop_duplicates()
+
+    # Fill missing numeric values
+    numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
+    for col in numeric_cols:
+        if col != target_column:
+            df[col] = df[col].fillna(df[col].median())
+
+    # Fill missing categorical values
+    categorical_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
+    for col in categorical_cols:
+        df[col] = df[col].fillna("unknown")
+
+    # One-hot encoding
+    df = pd.get_dummies(df, columns=categorical_cols, drop_first=True)
+
+    y = df[target_column]
+    X = df.drop(columns=[target_column])
+
+    return X, y
+#train.py
+from pathlib import Path
+import joblib
+import yaml
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score
+
+from preprocess import preprocess_data
+from utils import ensure_dir, save_json
+
+
+def load_config(path: str = "config.yaml") -> dict:
+    with open(path, "r") as f:
+        return yaml.safe_load(f)
+
+
+def main() -> None:
+    config = load_config()
+
+    # Change this to your sample file path
+    data_path = "sample_data.csv"
+    df = pd.read_csv(data_path)
+
+    X, y = preprocess_data(df, config["target_column"])
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y,
+        test_size=config["test_size"],
+        random_state=config["random_state"],
+        stratify=y if y.nunique() == 2 else None
+    )
+
+    models = {
+        "logistic_regression": LogisticRegression(max_iter=1000),
+        "random_forest": RandomForestClassifier(random_state=config["random_state"]),
+        "gradient_boosting": GradientBoostingClassifier(random_state=config["random_state"]),
+    }
+
+    results = {}
+    best_model = None
+    best_score = -1
+    best_name = None
+
+    for name, model in models.items():
+        model.fit(X_train, y_train)
+
+        if hasattr(model, "predict_proba"):
+            preds = model.predict_proba(X_test)[:, 1]
+        else:
+            preds = model.decision_function(X_test)
+
+        score = roc_auc_score(y_test, preds)
+        results[name] = {"roc_auc": round(score, 4)}
+
+        if score > best_score:
+            best_score = score
+            best_model = model
+            best_name = name
+
+    ensure_dir("models")
+    ensure_dir("outputs")
+
+    joblib.dump(best_model, f"models/{best_name}.joblib")
+    save_json(
+        {
+            "best_model": best_name,
+            "best_score": round(best_score, 4),
+            "all_results": results,
+        },
+        "outputs/metrics.json"
+    )
+
+    print("Training complete.")
+    print(f"Best model: {best_name}")
+    print(f"Best ROC-AUC: {best_score:.4f}")
+
+
+if __name__ == "__main__":
+    main()
